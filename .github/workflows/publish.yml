@@ -1,0 +1,93 @@
+name: Build and publish private-source release
+
+on:
+  repository_dispatch:
+    types: [publish-pokebox-sync]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-${{ github.event.client_payload.source_sha }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Build ${{ github.event.client_payload.source_sha }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate dispatch payload
+        env:
+          SOURCE_SHA: ${{ github.event.client_payload.source_sha }}
+          SOURCE_REPO: ${{ github.event.client_payload.source_repo }}
+          SOURCE_REF: ${{ github.event.client_payload.source_ref }}
+        run: |
+          test -n "$SOURCE_SHA"
+          test "$SOURCE_SHA" = "$(printf '%s' "$SOURCE_SHA" | tr -d '[:space:]')"
+          printf '%s\n' "$SOURCE_SHA" | grep -Eq '^[0-9a-f]{40}$'
+          test "$SOURCE_REPO" = "Neburb/gen1recompmod-pokebox-sync"
+          test -n "$SOURCE_REF"
+
+      - name: Check out private source commit
+        uses: actions/checkout@v4
+        with:
+          repository: Neburb/gen1recompmod-pokebox-sync
+          ref: ${{ github.event.client_payload.source_sha }}
+          token: ${{ secrets.SOURCE_REPO_TOKEN }}
+          path: source
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Install packaging dependencies
+        run: sudo apt-get update && sudo apt-get install -y lua5.4 luajit
+
+      - name: Check out pinned gen1recomp SDK
+        env:
+          SDK_COMMIT: 0c6c813e87d61a0b61ebd904cbb98a830a8f4be1
+        run: |
+          git init --quiet "$RUNNER_TEMP/gen1recomp-0.2.26"
+          git -C "$RUNNER_TEMP/gen1recomp-0.2.26" remote add origin \
+            https://github.com/bryanthaboi/gen1recomp.git
+          git -C "$RUNNER_TEMP/gen1recomp-0.2.26" fetch --quiet --depth 1 origin "$SDK_COMMIT"
+          git -C "$RUNNER_TEMP/gen1recomp-0.2.26" checkout --quiet --detach FETCH_HEAD
+          python3 - "$RUNNER_TEMP/gen1recomp-0.2.26/src/core/Version.lua" <<'PY'
+          from pathlib import Path
+          import re
+          import sys
+          path = Path(sys.argv[1])
+          source = path.read_text()
+          stamped, count = re.subn(r'engine = "0\\.0\\.0-dev"', 'engine = "0.2.26"', source)
+          if count != 1:
+              raise SystemExit("unexpected engine version declaration")
+          path.write_text(stamped)
+          PY
+
+      - name: Build reproducible package
+        env:
+          SOURCE_SHA: ${{ github.event.client_payload.source_sha }}
+        run: |
+          source/scripts/verify-release.sh \
+            "$RUNNER_TEMP/gen1recomp-0.2.26" \
+            "$RUNNER_TEMP/pokebox-sync-${SOURCE_SHA}.modpkg"
+
+      - name: Write checksum
+        env:
+          SOURCE_SHA: ${{ github.event.client_payload.source_sha }}
+        run: |
+          cd "$RUNNER_TEMP"
+          sha256sum "pokebox-sync-${SOURCE_SHA}.modpkg" > SHA256SUMS
+
+      - name: Publish immutable GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: commit-${{ github.event.client_payload.source_sha }}
+          name: PokéBox Sync build ${{ github.event.client_payload.source_sha }}
+          target_commitish: main
+          generate_release_notes: false
+          body: |
+            Automated public package for private source commit `${{ github.event.client_payload.source_sha }}`.
+
+            Source repository: https://github.com/Neburb/gen1recompmod-pokebox-sync/commit/${{ github.event.client_payload.source_sha }}
+          files: |
+            ${{ runner.temp }}/pokebox-sync-${{ github.event.client_payload.source_sha }}.modpkg
+            ${{ runner.temp }}/SHA256SUMS
