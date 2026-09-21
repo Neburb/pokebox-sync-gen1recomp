@@ -62,7 +62,12 @@ jobs:
           manifest = json.loads(open("source/manifest.json", encoding="utf-8").read())
           candidate = tuple(map(int, str(manifest["version"]).split(".")))
           latest = released[-1] if released else None
-          if latest is None or candidate > latest:
+          if latest is None:
+              # The existing private package is 0.8.0; start the public
+              # update channel at the next patch so it is newer on first install.
+              major, minor, patch = candidate
+              version = (major, minor, patch + 1)
+          elif candidate > latest:
               version = candidate
           else:
               major, minor, patch = latest
