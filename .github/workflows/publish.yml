@@ -132,3 +132,21 @@ jobs:
             --notes "Automated package for private source commit $SOURCE_SHA.\n\nSource: https://github.com/Neburb/gen1recompmod-pokebox-sync/commit/$SOURCE_SHA" \
             "dist/pokebox_sync-${VERSION}.zip" \
             dist/sha256sums.txt
+
+          # GitHub may report the release creation as successful while its
+          # release-list representation still exposes assets: []. The client
+          # consumes that list, so do not mark publication green until both
+          # assets are visible there, not merely on the upload subresource.
+          for attempt in $(seq 1 30); do
+            assets=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" \
+              --jq '[.assets[] | select(.state == "uploaded") | .name] | sort | join("\n")')
+            if grep -Fxq "pokebox_sync-${VERSION}.zip" <<<"$assets" \
+                && grep -Fxq "sha256sums.txt" <<<"$assets"; then
+              echo "Release ${TAG} exposes both install assets in its public metadata."
+              exit 0
+            fi
+            echo "Waiting for GitHub release metadata to expose assets (attempt ${attempt}/30)..."
+            sleep 5
+          done
+          echo "Release ${TAG} was created but its public metadata does not expose both assets." >&2
+          exit 1
