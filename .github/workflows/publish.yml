@@ -126,34 +126,46 @@ jobs:
           SOURCE_SHA: ${{ steps.version.outputs.source_sha }}
         run: |
           set -euo pipefail
-          gh release create "$TAG" \
-            --target main \
-            --title "PokéBox Sync $VERSION" \
-            --notes "Automated package for private source commit $SOURCE_SHA.\n\nSource: https://github.com/Neburb/gen1recompmod-pokebox-sync/commit/$SOURCE_SHA" \
+          # Create the release as a draft first. Creating and publishing in
+          # one gh command can let GitHub cache the public release metadata
+          # before the subsequent asset uploads are visible in it.
+          release_id=$(gh api --method POST "repos/${GITHUB_REPOSITORY}/releases" \
+            -f "tag_name=${TAG}" \
+            -f target_commitish=main \
+            -f "name=PokéBox Sync ${VERSION}" \
+            -f "body=Automated package for private source commit ${SOURCE_SHA}.\n\nSource: https://github.com/Neburb/gen1recompmod-pokebox-sync/commit/${SOURCE_SHA}" \
+            -F draft=true -F prerelease=false \
+            --jq '.id')
+
+          gh release upload "$TAG" \
             "dist/pokebox_sync-${VERSION}.zip" \
             dist/sha256sums.txt
 
-          # GitHub may report the release creation as successful while its
-          # release metadata temporarily exposes assets: []. Verify the
-          # authoritative assets endpoint before marking publication green.
-          release_id=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" --jq '.id')
+          assets=$(gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets" \
+            --paginate \
+            --jq '.[] | select(.state == "uploaded") | .name' | sort)
+          if ! grep -Fxq "pokebox_sync-${VERSION}.zip" <<<"$assets" \
+              || ! grep -Fxq "sha256sums.txt" <<<"$assets"; then
+            echo "Draft release ${TAG} is missing one or more install assets." >&2
+            exit 1
+          fi
+
+          # Publish only after the authoritative asset endpoint is complete.
+          gh api --method PATCH "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
+            -F draft=false >/dev/null
+
+          # Confirm the public release-list representation eventually includes
+          # the assets too; this catches the exact updater-visible failure.
           for attempt in $(seq 1 30); do
-            assets=$(gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets" \
-              --paginate \
-              --jq '.[] | select(.state == "uploaded") | .name' | sort)
-            if grep -Fxq "pokebox_sync-${VERSION}.zip" <<<"$assets" \
-                && grep -Fxq "sha256sums.txt" <<<"$assets"; then
-              echo "Release ${TAG} exposes both install assets on its assets endpoint."
-              visible=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" \
-                --jq '.assets[].name')
-              if ! grep -Fxq "pokebox_sync-${VERSION}.zip" <<<"$visible" \
-                  || ! grep -Fxq "sha256sums.txt" <<<"$visible"; then
-                echo "GitHub release metadata still has a stale assets list; the direct assets endpoint is healthy." >&2
-              fi
+            visible=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" \
+              --jq '.assets[].name')
+            if grep -Fxq "pokebox_sync-${VERSION}.zip" <<<"$visible" \
+                && grep -Fxq "sha256sums.txt" <<<"$visible"; then
+              echo "Release ${TAG} is publicly visible with both install assets."
               exit 0
             fi
-            echo "Waiting for GitHub release assets to become visible (attempt ${attempt}/30)..."
+            echo "Waiting for published release metadata to expose assets (attempt ${attempt}/30)..."
             sleep 5
           done
-          echo "Release ${TAG} was created but its assets endpoint does not expose both assets." >&2
+          echo "Release ${TAG} was published but its public metadata does not expose both assets." >&2
           exit 1
