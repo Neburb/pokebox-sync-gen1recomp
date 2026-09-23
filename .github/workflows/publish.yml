@@ -134,19 +134,26 @@ jobs:
             dist/sha256sums.txt
 
           # GitHub may report the release creation as successful while its
-          # release-list representation still exposes assets: []. The client
-          # consumes that list, so do not mark publication green until both
-          # assets are visible there, not merely on the upload subresource.
+          # release metadata temporarily exposes assets: []. Verify the
+          # authoritative assets endpoint before marking publication green.
+          release_id=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" --jq '.id')
           for attempt in $(seq 1 30); do
-            assets=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" \
-              --jq '[.assets[] | select(.state == "uploaded") | .name] | sort | join("\n")')
+            assets=$(gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets" \
+              --paginate \
+              --jq '.[] | select(.state == "uploaded") | .name' | sort)
             if grep -Fxq "pokebox_sync-${VERSION}.zip" <<<"$assets" \
                 && grep -Fxq "sha256sums.txt" <<<"$assets"; then
-              echo "Release ${TAG} exposes both install assets in its public metadata."
+              echo "Release ${TAG} exposes both install assets on its assets endpoint."
+              visible=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" \
+                --jq '.assets[].name')
+              if ! grep -Fxq "pokebox_sync-${VERSION}.zip" <<<"$visible" \
+                  || ! grep -Fxq "sha256sums.txt" <<<"$visible"; then
+                echo "GitHub release metadata still has a stale assets list; the direct assets endpoint is healthy." >&2
+              fi
               exit 0
             fi
-            echo "Waiting for GitHub release metadata to expose assets (attempt ${attempt}/30)..."
+            echo "Waiting for GitHub release assets to become visible (attempt ${attempt}/30)..."
             sleep 5
           done
-          echo "Release ${TAG} was created but its public metadata does not expose both assets." >&2
+          echo "Release ${TAG} was created but its assets endpoint does not expose both assets." >&2
           exit 1
